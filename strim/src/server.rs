@@ -765,6 +765,7 @@ impl Server {
                     region: target.region.clone(),
                     secret: target.secret.clone(),
                     key_prefix: format!("{}/", stream_key),
+                    delete_old_segments_after: Some("10m".to_string()),
                 },
                 transcribe: true,
             },

@@ -20,6 +20,9 @@ pub struct StrimTarget {
 
     #[serde(rename = "keyPrefix")]
     pub key_prefix: String,
+
+    #[serde(rename = "deleteOldSegmentsAfter")]
+    pub delete_old_segments_after: Option<String>,
 }
 
 #[derive(CustomResource, Serialize, Deserialize, Default, Debug, PartialEq, Clone, JsonSchema)]

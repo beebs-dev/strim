@@ -105,68 +105,79 @@ fn ffmpeg_pod(instance: &Strim) -> Pod {
                         mount_path: HLS_DIR.to_string(),
                         ..Default::default()
                     }]),
-                    env: Some(vec![
-                        EnvVar {
-                            name: "NODE_ID".to_string(),
-                            value_from: Some(EnvVarSource {
-                                field_ref: Some(ObjectFieldSelector {
-                                    field_path: "metadata.name".to_string(),
+                    env: Some({
+                        let mut env = vec![
+                            EnvVar {
+                                name: "NODE_ID".to_string(),
+                                value_from: Some(EnvVarSource {
+                                    field_ref: Some(ObjectFieldSelector {
+                                        field_path: "metadata.name".to_string(),
+                                        ..Default::default()
+                                    }),
                                     ..Default::default()
                                 }),
                                 ..Default::default()
-                            }),
-                            ..Default::default()
-                        },
-                        EnvVar {
-                            name: "HLS_DIR".to_string(),
-                            value: Some("/hls".to_string()),
-                            ..Default::default()
-                        },
-                        EnvVar {
-                            name: "AWS_ACCESS_KEY_ID".to_string(),
-                            value_from: Some(EnvVarSource {
-                                secret_key_ref: Some(SecretKeySelector {
-                                    key: "access_key_id".to_string(),
-                                    name: instance.spec.target.secret.clone(),
+                            },
+                            EnvVar {
+                                name: "HLS_DIR".to_string(),
+                                value: Some("/hls".to_string()),
+                                ..Default::default()
+                            },
+                            EnvVar {
+                                name: "AWS_ACCESS_KEY_ID".to_string(),
+                                value_from: Some(EnvVarSource {
+                                    secret_key_ref: Some(SecretKeySelector {
+                                        key: "access_key_id".to_string(),
+                                        name: instance.spec.target.secret.clone(),
+                                        ..Default::default()
+                                    }),
                                     ..Default::default()
                                 }),
                                 ..Default::default()
-                            }),
-                            ..Default::default()
-                        },
-                        EnvVar {
-                            name: "AWS_SECRET_ACCESS_KEY".to_string(),
-                            value_from: Some(EnvVarSource {
-                                secret_key_ref: Some(SecretKeySelector {
-                                    key: "secret_access_key".to_string(),
-                                    name: instance.spec.target.secret.clone(),
+                            },
+                            EnvVar {
+                                name: "AWS_SECRET_ACCESS_KEY".to_string(),
+                                value_from: Some(EnvVarSource {
+                                    secret_key_ref: Some(SecretKeySelector {
+                                        key: "secret_access_key".to_string(),
+                                        name: instance.spec.target.secret.clone(),
+                                        ..Default::default()
+                                    }),
                                     ..Default::default()
                                 }),
                                 ..Default::default()
-                            }),
-                            ..Default::default()
-                        },
-                        EnvVar {
-                            name: "S3_BUCKET".to_string(),
-                            value: Some(instance.spec.target.bucket.clone()),
-                            ..Default::default()
-                        },
-                        EnvVar {
-                            name: "S3_REGION".to_string(),
-                            value: Some(instance.spec.target.region.clone()),
-                            ..Default::default()
-                        },
-                        EnvVar {
-                            name: "S3_ENDPOINT".to_string(),
-                            value: Some(instance.spec.target.endpoint.clone()),
-                            ..Default::default()
-                        },
-                        EnvVar {
-                            name: "S3_KEY_PREFIX".to_string(),
-                            value: Some(instance.spec.target.key_prefix.clone()),
-                            ..Default::default()
-                        },
-                    ]),
+                            },
+                            EnvVar {
+                                name: "S3_BUCKET".to_string(),
+                                value: Some(instance.spec.target.bucket.clone()),
+                                ..Default::default()
+                            },
+                            EnvVar {
+                                name: "S3_REGION".to_string(),
+                                value: Some(instance.spec.target.region.clone()),
+                                ..Default::default()
+                            },
+                            EnvVar {
+                                name: "S3_ENDPOINT".to_string(),
+                                value: Some(instance.spec.target.endpoint.clone()),
+                                ..Default::default()
+                            },
+                            EnvVar {
+                                name: "S3_KEY_PREFIX".to_string(),
+                                value: Some(instance.spec.target.key_prefix.clone()),
+                                ..Default::default()
+                            },
+                        ];
+                        if let Some(delete_after) = &instance.spec.target.delete_old_segments_after
+                        {
+                            env.push(EnvVar {
+                                name: "DELETE_OLD_SEGMENTS_AFTER".to_string(),
+                                value: Some(delete_after.clone()),
+                                ..Default::default()
+                            });
+                        }
+                        env
+                    }),
                     ..Default::default()
                 },
             ],

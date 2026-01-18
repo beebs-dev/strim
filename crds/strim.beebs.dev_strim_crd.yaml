@@ -37,6 +37,9 @@ spec:
                 properties:
                   bucket:
                     type: string
+                  deleteOldSegmentsAfter:
+                    nullable: true
+                    type: string
                   endpoint:
                     type: string
                   keyPrefix:

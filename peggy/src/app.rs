@@ -11,7 +11,13 @@ use notify::{
     event::{CreateKind, DataChange, ModifyKind, RenameMode},
 };
 use owo_colors::{OwoColorize, Rgb};
-use std::{ops::Deref, os::unix::fs::MetadataExt, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    ops::Deref,
+    os::unix::fs::MetadataExt,
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
 use tokio::{select, sync::mpsc};
 use tokio_util::sync::CancellationToken;
 
@@ -125,12 +131,104 @@ impl App {
                 .context("Failed to remove file after upload")?;
             println!(
                 "{}{}{}{}",
-                "♻️ Garbage collected local file • path=".color(FG1),
+                "♻️  Garbage collected local file • path=".color(FG1),
                 path.to_str().unwrap().color(FG2),
                 " • size=".color(FG1),
                 format!("{:.2} MiB", size_mb).color(FG2),
             );
         }
+        Ok(())
+    }
+
+    pub async fn garbage_collect_old_segments_in_s3(&self, max_age: Duration) -> Result<()> {
+        let now = SystemTime::now();
+        let cutoff = match now.checked_sub(max_age) {
+            Some(cutoff) => cutoff,
+            None => return Ok(()),
+        };
+
+        let mut continuation_token: Option<String> = None;
+        let mut scanned = 0usize;
+        let mut deleted = 0usize;
+        let mut skipped_young = 0usize;
+
+        loop {
+            let mut req = self
+                .client
+                .list_objects_v2()
+                .bucket(&self.bucket)
+                .prefix(&self.key_prefix);
+            if let Some(token) = continuation_token.as_deref() {
+                req = req.continuation_token(token);
+            }
+
+            let resp = req.send().await.with_context(|| {
+                format!(
+                    "Failed to list S3 objects under prefix '{}'",
+                    self.key_prefix
+                )
+            })?;
+
+            for obj in resp.contents() {
+                scanned += 1;
+                let Some(key) = obj.key() else {
+                    continue;
+                };
+                if key.ends_with(".m3u8") {
+                    continue;
+                }
+                if !(key.ends_with(".ts") || key.ends_with(".vtt")) {
+                    continue;
+                }
+
+                let Some(last_modified) = obj.last_modified().copied() else {
+                    continue;
+                };
+                let last_modified = match SystemTime::try_from(last_modified) {
+                    Ok(t) => t,
+                    Err(_) => continue,
+                };
+
+                // Ignore objects newer than the retention period.
+                if last_modified > cutoff {
+                    skipped_young += 1;
+                    continue;
+                }
+
+                self.client
+                    .delete_object()
+                    .bucket(&self.bucket)
+                    .key(key)
+                    .send()
+                    .await
+                    .with_context(|| format!("Failed to delete old S3 segment '{}'", key))?;
+                deleted += 1;
+            }
+
+            continuation_token = resp.next_continuation_token().map(|s| s.to_string());
+            if continuation_token.is_none() {
+                break;
+            }
+        }
+
+        if deleted > 0 {
+            println!(
+                "{}{}{}{}{}{}{}{}{}{}{}{}",
+                "🧹 S3 garbage collected old segments • bucket=".color(FG1),
+                self.bucket.color(FG2),
+                " • prefix=".color(FG1),
+                self.key_prefix.color(FG2),
+                " • deleted=".color(FG1),
+                deleted.to_string().color(FG2),
+                " • scanned=".color(FG1),
+                scanned.to_string().color(FG2),
+                " • skipped_young=".color(FG1),
+                skipped_young.to_string().color(FG2),
+                " • max_age=".color(FG1),
+                humantime::format_duration(max_age).to_string().color(FG2),
+            );
+        }
+
         Ok(())
     }
 }
@@ -172,6 +270,30 @@ pub async fn run(args: RunArgs) -> Result<()> {
         args.s3_key_prefix.clone(),
         hls_dir.clone(),
     );
+
+    if let Some(retention) = args.delete_old_segments_after.as_deref() {
+        let max_age = humantime::parse_duration(retention)
+            .with_context(|| format!("Failed to parse DELETE_OLD_SEGMENTS_AFTER='{retention}'"))?;
+        let gc_app = app.clone();
+        let gc_cancel = cancel.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(max_age);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    _ = gc_cancel.cancelled() => {
+                        println!("{}", "🛑 Stopping S3 garbage collector".red());
+                        break;
+                    }
+                    _ = ticker.tick() => {
+                        if let Err(e) = gc_app.garbage_collect_old_segments_in_s3(max_age).await {
+                            log_error(e.context("S3 garbage collector iteration failed"));
+                        }
+                    }
+                }
+            }
+        });
+    }
     println!("{}", "🚀 Starting peggy".green());
     let (tx, mut rx) = mpsc::channel::<PathBuf>(1024);
     let watch_dir = hls_dir.clone();
