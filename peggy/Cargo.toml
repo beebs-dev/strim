@@ -1,0 +1,32 @@
+[package]
+name = "strim-peggy"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+strim-common = { path = "../common" }
+tempfile = { workspace = true }
+tokio = { workspace = true }
+bytes = { workspace = true }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+futures-util = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+async-nats = { workspace = true }
+owo-colors = { workspace = true }
+humantime = { workspace = true }
+notify = { version = "6", default-features = false, features = [
+    "macos_kqueue",
+] }
+aws-config = { workspace = true }
+aws-sdk-s3 = { workspace = true }
+aws-types = { workspace = true }
+aws-smithy-types = { workspace = true }
+aws-smithy-http = { workspace = true }
+aws-smithy-runtime-api = { workspace = true }
+dashmap = "6.1.0"

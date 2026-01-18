@@ -34,6 +34,7 @@ COPY Cargo.lock .
 COPY common/Cargo.toml common/Cargo.toml
 COPY operator/Cargo.toml operator/Cargo.toml
 COPY strim/Cargo.toml strim/Cargo.toml
+COPY peggy/Cargo.toml peggy/Cargo.toml
 COPY types/Cargo.toml types/Cargo.toml
 
 COPY --from=chef /app/recipe.json recipe.json
