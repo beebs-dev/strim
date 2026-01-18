@@ -1,7 +1,10 @@
 use crate::util::{Error, messages, patch::*};
-use k8s_openapi::api::core::v1::{
-    Container, EnvVar, EnvVarSource, ObjectFieldSelector, Pod, PodSpec, SecretKeySelector, Volume,
-    VolumeMount,
+use k8s_openapi::{
+    api::core::v1::{
+        Container, EnvVar, EnvVarSource, ObjectFieldSelector, Pod, PodSpec, ResourceRequirements,
+        SecretKeySelector, Volume, VolumeMount,
+    },
+    apimachinery::pkg::api::resource::Quantity,
 };
 use kube::{
     Api, Client,
@@ -182,6 +185,21 @@ fn ffmpeg_pod(instance: &Strim) -> Pod {
                 },
             ],
             restart_policy: Some("Never".to_string()),
+            // resources: Some(ResourceRequirements {
+            //     requests: Some({
+            //         let mut m = std::collections::BTreeMap::new();
+            //         m.insert("cpu".to_string(), Quantity("500m".to_string()));
+            //         m.insert("memory".to_string(), Quantity("64Mi".to_string()));
+            //         m
+            //     }),
+            //     limits: Some({
+            //         let mut m = std::collections::BTreeMap::new();
+            //         //m.insert("cpu".to_string(), Quantity("2000m".to_string()));
+            //         m.insert("memory".to_string(), Quantity("512Mi".to_string()));
+            //         m
+            //     }),
+            //     ..Default::default()
+            // }),
             ..Default::default()
         }),
         status: None,

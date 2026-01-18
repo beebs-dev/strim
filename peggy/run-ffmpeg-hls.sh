@@ -25,12 +25,12 @@ SEGMENT_PATTERN="${HLS_DIR}/segment_%05d.ts"
 exec ffmpeg \
   -hide_banner \
   -loglevel info \
-  -re \
+  -thread_queue_size 1024 \
   -i "${RTMP_URL}" \
   -c:v copy \
-  -c:a aac \
+  -c:a copy \
   -f hls \
-  -hls_time 4 \
+  -hls_time 8 \
   -hls_list_size 450 \
   -hls_flags delete_segments+append_list+temp_file \
   -hls_segment_type mpegts \
