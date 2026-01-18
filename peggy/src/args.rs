@@ -27,6 +27,6 @@ pub(crate) struct RunArgs {
     #[arg(long, env = "S3_KEY_PREFIX", required = true)]
     pub s3_key_prefix: String,
 
-    #[arg(long, env = "DELETE_OLD_SEGMENTS", default_value_t = false)]
-    pub delete_old_segments: bool,
+    #[arg(long, env = "DELETE_OLD_SEGMENTS_AFTER")]
+    pub delete_old_segments_after: Option<String>,
 }
