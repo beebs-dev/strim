@@ -1,3 +1,6 @@
+prometheus:
+  enabled: false
+
 strim:
   image: thavlik/strim:latest
   imagePullPolicy: Always

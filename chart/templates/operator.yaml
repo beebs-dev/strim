@@ -115,7 +115,7 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
-{{ include "synapse.metrics-env" . | indent 8 }}
+{{ include "strim.metrics-env" . | indent 8 }}
 ---
 {{- if .Values.prometheus.enabled }}
 apiVersion: monitoring.coreos.com/v1

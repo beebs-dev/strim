@@ -68,7 +68,7 @@ spec:
 {{ toYaml .Values.strim.resources | indent 10 }}
     {{- end }}
         command:
-          - synapse-strim
+          - strim
           - server
           - --port
           - "7080"
@@ -80,6 +80,8 @@ spec:
         - containerPort: 2112
           protocol: TCP
           name: metrics
+{{- else }}
+{{- if .Values.prometheus.enabled }}
         readinessProbe:
           httpGet:
             path: /readyz
@@ -130,7 +132,7 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
-{{ include "synapse.metrics-env" . | indent 8 }}
+{{ include "strim.metrics-env" . | indent 8 }}
 ---
 {{- if .Values.prometheus.enabled }}
 apiVersion: monitoring.coreos.com/v1
