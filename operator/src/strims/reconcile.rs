@@ -6,10 +6,12 @@ use kube::{
     client::Client,
     runtime::{Controller, controller::Action},
 };
+use kube_leader_election::{LeaseLock, LeaseLockParams};
 use owo_colors::OwoColorize;
 use std::sync::Arc;
 use strim_types::*;
 use tokio::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 use super::actions;
 use crate::util::{
@@ -25,10 +27,7 @@ pub async fn run(client: Client) -> Result<(), Error> {
     println!("{}", "Starting Strim controller...".green());
 
     // Preparation of resources used by the `kube_runtime::Controller`
-    let crd_api: Api<Strim> = Api::all(client.clone());
     let context: Arc<ContextData> = Arc::new(ContextData::new(client.clone()));
-
-    strim_common::signal_ready();
 
     // The controller comes from the `kube_runtime` crate and manages the reconciliation process.
     // It requires the following information:
@@ -36,12 +35,95 @@ pub async fn run(client: Client) -> Result<(), Error> {
     // - `kube::api::ListParams` to select the `Strim` resources with. Can be used for Strim filtering `Strim` resources before reconciliation,
     // - `reconcile` function with reconciliation logic to be called each time a resource of `Strim` kind is created/updated/deleted,
     // - `on_error` function to call whenever reconciliation fails.
-    Controller::new(crd_api, Default::default())
-        .owns(Api::<Pod>::all(client), Default::default())
-        .run(reconcile, on_error, context)
-        .for_each(|_reconciliation_result| async move {})
-        .await;
-    Ok(())
+    //Controller::new(crd_api, Default::default())
+    //    .owns(Api::<Pod>::all(client), Default::default())
+    //    .run(reconcile, on_error, context)
+    //    .for_each(|_reconciliation_result| async move {})
+    //    .await;
+    //Ok(())
+
+    // Namespace where the Lease object lives.
+    // Commonly: the controller's namespace. If you deploy in one namespace, hardcode it.
+    // If you want it dynamic, inject POD_NAMESPACE via the Downward API.
+    let lease_namespace = std::env::var("POD_NAMESPACE").unwrap_or_else(|_| "default".to_string());
+    // Unique identity per replica (Downward API POD_NAME is ideal).
+    // Fallback to hostname if not present.
+    let holder_id = std::env::var("POD_NAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_else(|_| format!("strim-controller-{}", uuid::Uuid::new_v4()));
+    // The shared lock name across all replicas
+    let lease_name = "strim-controller-lock".to_string();
+    // TTL: how long leadership is considered valid without renewal.
+    // Renew should happen well before TTL expires.
+    let lease_ttl = Duration::from_secs(15);
+    let renew_every = Duration::from_secs(5);
+    let leadership = LeaseLock::new(
+        client.clone(),
+        &lease_namespace,
+        LeaseLockParams {
+            holder_id,
+            lease_name,
+            lease_ttl,
+        },
+    );
+
+    let shutdown = CancellationToken::new();
+    let shutdown_signal = shutdown.clone();
+    tokio::spawn(async move {
+        strim_common::shutdown::shutdown_signal().await;
+        shutdown_signal.cancel();
+    });
+    strim_common::signal_ready();
+    println!("{}", "🌱 Starting Strim controller...".green());
+    // We run indefinitely; only the leader runs the controller.
+    // On leadership loss, we abort the controller and go back to standby.
+    let mut controller_task: Option<tokio::task::JoinHandle<()>> = None;
+    let mut tick = tokio::time::interval(renew_every);
+    loop {
+        tokio::select! {
+            _ = shutdown.cancelled() => {
+                if let Some(task) = controller_task.take() {
+                    task.abort();
+                    task.await.ok();
+                }
+                break Ok(())
+            },
+            _ = tick.tick() => {}
+        }
+        let lease = match leadership.try_acquire_or_renew().await {
+            Ok(l) => l,
+            Err(e) => {
+                // If we can't talk to the apiserver / update Lease, assume we are not safe to lead.
+                eprintln!("leader election renew/acquire failed: {e}");
+                if let Some(task) = controller_task.take() {
+                    task.abort();
+                    eprintln!("aborted controller due to leader election error");
+                }
+                continue;
+            }
+        };
+        if lease.acquired_lease {
+            // We are leader; ensure controller is running
+            if controller_task.is_none() {
+                println!("acquired leadership; starting controller");
+                let client_for_controller = client.clone();
+                let context_for_controller = context.clone();
+                let crd_api_for_controller: Api<Strim> = Api::all(client_for_controller.clone());
+                controller_task = Some(tokio::spawn(async move {
+                    println!("{}", "🚀 Strim controller started.".green());
+                    Controller::new(crd_api_for_controller, Default::default())
+                        .owns(Api::<Pod>::all(client_for_controller), Default::default())
+                        .run(reconcile, on_error, context_for_controller)
+                        .for_each(|_res| async move {})
+                        .await;
+                }));
+            }
+        } else if let Some(task) = controller_task.take() {
+            // We are NOT leader; ensure controller is stopped
+            eprintln!("lost leadership; stopping controller");
+            task.abort();
+        }
+    }
 }
 
 /// Context injected with each `reconcile` and `on_error` method invocation.
