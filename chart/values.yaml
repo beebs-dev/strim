@@ -12,6 +12,7 @@ strim:
     limits:
       memory: "128Mi"
   target:
+    enabled: false # in-memory only
     bucket: ""
     endpoint: ""
     region: "us-east-1"

@@ -695,7 +695,7 @@ impl Server {
         let (name, hash) = pod_name(&self.pod_ip, &stream_key, random_usize);
         let target = match self.target {
             Some(ref target) => target,
-            None => return,
+            None => return, // no s3 upload target configured
         };
         self.connection_gc.insert(
             requested_connection_id,

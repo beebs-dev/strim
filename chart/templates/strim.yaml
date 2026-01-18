@@ -54,19 +54,19 @@ spec:
       labels:
         app: {{ .Release.Name }}-strim
     spec:
-    {{- if .Values.imagePullSecrets }}
+{{- if .Values.imagePullSecrets }}
       imagePullSecrets:
 {{ toYaml .Values.imagePullSecrets | indent 10 }}
-    {{- end }}
+{{- end }}
       serviceAccountName: {{ .Release.Name }}-strim
       containers:
       - name: strim
         imagePullPolicy: {{ .Values.strim.imagePullPolicy }}
         image: {{ $image }}
-    {{- if .Values.strim.resources }}
+{{- if .Values.strim.resources }}
         resources:
 {{ toYaml .Values.strim.resources | indent 10 }}
-    {{- end }}
+{{- end }}
         command:
           - strim
           - server
@@ -106,6 +106,7 @@ spec:
           value: info,aws_smithy_runtime=debug,aws_smithy_http_tower=debug,hyper=info
         - name: LOG_LEVEL
           value: {{ .Values.strim.logLevel }}
+      {{- if .Values.strim.target.enabled }}
         - name: TARGET_BUCKET
           value: {{ .Values.strim.target.bucket }}
         - name: TARGET_ENDPOINT
@@ -116,6 +117,7 @@ spec:
           value: {{ .Values.strim.target.secret }}
         - name: TARGET_KEY_PREFIX
           value: {{ .Values.strim.target.keyPrefix }}
+      {{- end }}
         - name: POD_NAME
           valueFrom:
             fieldRef:
