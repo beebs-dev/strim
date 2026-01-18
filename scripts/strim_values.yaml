@@ -9,8 +9,9 @@ strim:
     limits:
       memory: "128Mi"
   target:
-    bucket: ""
-    endpoint: ""
-    region: "us-east-1"
-    secret: ""
-    keyPrefix: ""
+    enabled: true
+    bucket: gibstrim
+    endpoint: https://nyc3.digitaloceanspaces.com
+    region: "nyc3"
+    secret: spaces-cred
+    keyPrefix: "live/"
