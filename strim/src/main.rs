@@ -5,9 +5,11 @@ mod colors;
 mod connection;
 mod server;
 
-use crate::args::{Target, TargetArgs};
-use crate::colors::{FG1, FG2};
-use anyhow::{Context, Result};
+use crate::{
+    args::{Target, TargetArgs},
+    colors::{FG1, FG2},
+};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 use connection::{Connection, ConnectionError, ReadResult};
 use kube::Client;
@@ -16,10 +18,10 @@ use mio::*;
 use owo_colors::OwoColorize;
 use server::{Server, ServerResult};
 use slab::Slab;
-use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::time::SystemTime;
+use std::{collections::HashSet, time::Duration};
 use strim_common::shutdown::shutdown_signal;
 
 const SERVER: Token = Token(usize::MAX - 1);
@@ -111,11 +113,13 @@ async fn run_server(args: args::ServerArgs) -> Result<()> {
     let mut connections = Slab::new();
 
     let cancel = tokio_util::sync::CancellationToken::new();
-    let cancel_clone = cancel.clone();
-    tokio::spawn(async move {
-        shutdown_signal().await;
-        println!("{}", "🛑 Shutdown signal received".red());
-        cancel_clone.cancel();
+    tokio::spawn({
+        let cancel = cancel.clone();
+        async move {
+            shutdown_signal().await;
+            println!("{}", "🛑 Shutdown signal received".red());
+            cancel.cancel();
+        }
     });
 
     // if let Some(ref pull) = app_options.pull {
@@ -155,17 +159,17 @@ async fn run_server(args: args::ServerArgs) -> Result<()> {
 
     loop {
         if cancel.is_cancelled() {
-            println!("Shutting down server");
-            return Err(anyhow::anyhow!("Shutdown signal received"));
+            bail!("Context cancelled");
         }
-        poll.poll(&mut events, None).unwrap();
-
+        poll.poll(&mut events, Some(Duration::from_millis(100)))
+            .context("Failed to poll for RTMP events")?;
         inner_started_at = SystemTime::now();
         _poll_count += 1;
-
         for event in events.iter() {
+            if cancel.is_cancelled() {
+                bail!("Context cancelled");
+            }
             let mut connections_to_close = ClosedTokens::new();
-
             match event.token() {
                 SERVER => {
                     let (socket, _) = listener.accept().unwrap();
