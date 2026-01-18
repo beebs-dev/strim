@@ -1,6 +1,3 @@
-prometheus:
-  enabled: false
-
 strim:
   image: thavlik/strim:latest
   imagePullPolicy: Always
@@ -17,14 +14,3 @@ strim:
     region: "us-east-1"
     secret: ""
     keyPrefix: ""
-
-operator:
-  image: thavlik/strim-operator:latest
-  imagePullPolicy: Always
-  replicas: 1
-  logLevel: debug
-  resources:
-    requests: 
-      memory: "32Mi"
-    limits:
-      memory: "64Mi"
