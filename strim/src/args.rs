@@ -1,4 +1,4 @@
-use clap::{ArgGroup, Parser, Subcommand};
+use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
@@ -38,16 +38,6 @@ pub struct ServerArgs {
 }
 
 #[derive(Debug, Clone, clap::Args)]
-#[command(group(
-    ArgGroup::new("target")
-        .args([
-            "bucket",
-            "endpoint",
-            "region",
-            "secret",
-            "key_prefix",
-        ])
-))]
 pub struct TargetArgs {
     #[arg(
         long,

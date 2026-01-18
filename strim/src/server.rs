@@ -3,6 +3,7 @@ use super::{
     args::Target,
     colors::{FG1, FG2},
 };
+//use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use bytes::Bytes;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
 use kube::{Api, Client};
@@ -16,11 +17,18 @@ use rml_rtmp::sessions::{
     ServerSession, ServerSessionConfig, ServerSessionEvent, ServerSessionResult,
 };
 use rml_rtmp::time::RtmpTimestamp;
+use serde::Deserialize;
 use sha2::Digest;
 use slab::Slab;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use strim_types::{Strim, StrimSource, StrimSpec, StrimTarget};
+
+#[derive(Deserialize, Clone, Debug)]
+struct StreamKeyPayload {
+    pub stream_key: String,
+    pub stable_id: String,
+}
 
 fn stream_hash(pod_ip: &str, stream_key: &str, entropy: usize) -> String {
     let mut hash = sha2::Sha256::new();
@@ -592,6 +600,30 @@ impl Server {
         stream_key: String,
         server_results: &mut Vec<ServerResult>,
     ) {
+        //let Ok(stream_key) = URL_SAFE_NO_PAD.decode(stream_key.as_bytes()) else {
+        //    eprintln!(
+        //        "{}{}{}{}",
+        //        "❌ Publish request stream key base64 decode failed • connection_id=".red(),
+        //        requested_connection_id.red().dimmed(),
+        //        " • stream_key=".red(),
+        //        stream_key.red().dimmed(),
+        //    );
+        //    return;
+        //};
+        //let Ok(StreamKeyPayload {
+        //    stream_key,
+        //    stable_id,
+        //}) = serde_json::from_slice(&stream_key)
+        //else {
+        //    eprintln!(
+        //        "{}{}{}{}",
+        //        "❌ Publish request stream key JSON decode failed • connection_id=".red(),
+        //        requested_connection_id.red().dimmed(),
+        //        " • stream_key=".red(),
+        //        String::from_utf8_lossy(&stream_key).red().dimmed(),
+        //    );
+        //    return;
+        //};
         eprintln!(
             "{}{}{}{}",
             "📢 Publish requested • app_name=".color(FG1),
@@ -692,10 +724,10 @@ impl Server {
             }
         }
         let random_usize = rand::random::<u64>() as usize;
-        let (name, hash) = pod_name(&self.pod_ip, &stream_key, random_usize);
+        let (name, _hash) = pod_name(&self.pod_ip, &stream_key, random_usize);
         let target = match self.target {
             Some(ref target) => target,
-            None => return, // no s3 upload target configured
+            None => return, // no s3 upload``
         };
         self.connection_gc.insert(
             requested_connection_id,
@@ -732,7 +764,7 @@ impl Server {
                     endpoint: target.endpoint.clone(),
                     region: target.region.clone(),
                     secret: target.secret.clone(),
-                    key_prefix: format!("{}/", hash),
+                    key_prefix: format!("{}/", stream_key),
                 },
                 transcribe: true,
             },
