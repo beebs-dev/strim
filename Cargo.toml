@@ -3,6 +3,7 @@ members = [
     "common",
     "operator",
     "types",
+    "peggy",
     "strim",
 ]
 resolver = "3"

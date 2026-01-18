@@ -6,7 +6,7 @@ mod args;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    synapse_common::init();
+    strim_common::init();
     let args = args::RunArgs::parse();
     app::run(args).await?;
     Ok(())

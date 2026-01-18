@@ -134,11 +134,12 @@ impl App {
 }
 
 pub async fn run(args: crate::args::RunArgs) -> Result<()> {
-    seer_common::metrics::maybe_spawn_metrics_server(args.node_id.clone());
+    strim_common::metrics::maybe_spawn_metrics_server();
+
     let cancel = CancellationToken::new();
     let cancel_clone = cancel.clone();
     tokio::spawn(async move {
-        synapse_common::shutdown::shutdown_signal().await;
+        strim_common::shutdown::shutdown_signal().await;
         cancel_clone.cancel();
     });
     let s3_creds = S3Credentials::new(
