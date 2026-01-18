@@ -80,8 +80,6 @@ spec:
         - containerPort: 2112
           protocol: TCP
           name: metrics
-{{- else }}
-{{- if .Values.prometheus.enabled }}
         readinessProbe:
           httpGet:
             path: /readyz

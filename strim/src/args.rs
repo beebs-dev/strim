@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{ArgGroup, Parser, Subcommand};
 
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
@@ -34,23 +34,74 @@ pub struct ServerArgs {
     pub port: u16,
 
     #[clap(flatten)]
-    pub target: Option<Target>,
+    pub target: Option<TargetArgs>,
 }
 
 #[derive(Debug, Clone, clap::Args)]
+#[command(group(
+    ArgGroup::new("target")
+        .args([
+            "bucket",
+            "endpoint",
+            "region",
+            "secret",
+            "key_prefix",
+        ])
+))]
+pub struct TargetArgs {
+    #[arg(
+        long,
+        env = "TARGET_BUCKET", 
+        requires_all = [
+            "endpoint",
+            "region",
+            "secret",
+            "key_prefix"
+        ]
+    )]
+    pub bucket: Option<String>,
+
+    #[arg(long, env = "TARGET_ENDPOINT")]
+    pub endpoint: Option<String>,
+
+    #[arg(long, env = "TARGET_REGION")]
+    pub region: Option<String>,
+
+    #[arg(long, env = "TARGET_SECRET")]
+    pub secret: Option<String>,
+
+    #[arg(long, env = "TARGET_KEY_PREFIX")]
+    pub key_prefix: Option<String>,
+}
+
 pub struct Target {
-    #[arg(long, env = "TARGET_BUCKET", required = true)]
     pub bucket: String,
-
-    #[arg(long, env = "TARGET_ENDPOINT", required = true)]
     pub endpoint: String,
-
-    #[arg(long, env = "TARGET_REGION", required = true)]
     pub region: String,
-
-    #[arg(long, env = "TARGET_SECRET", required = true)]
     pub secret: String,
-
-    #[arg(long, env = "TARGET_KEY_PREFIX", required = true)]
     pub key_prefix: String,
+}
+
+impl TryFrom<TargetArgs> for Target {
+    type Error = anyhow::Error;
+
+    fn try_from(args: TargetArgs) -> Result<Self, Self::Error> {
+        Ok(Target {
+            bucket: args
+                .bucket
+                .ok_or_else(|| anyhow::anyhow!("Target bucket is required"))?,
+            endpoint: args
+                .endpoint
+                .ok_or_else(|| anyhow::anyhow!("Target endpoint is required"))?,
+            region: args
+                .region
+                .ok_or_else(|| anyhow::anyhow!("Target region is required"))?,
+            secret: args
+                .secret
+                .ok_or_else(|| anyhow::anyhow!("Target secret is required"))?,
+            key_prefix: args
+                .key_prefix
+                .ok_or_else(|| anyhow::anyhow!("Target key_prefix is required"))?,
+        })
+    }
 }

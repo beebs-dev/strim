@@ -51,7 +51,7 @@ subjects:
     name: {{ .Release.Name }}-operator
     namespace: {{ .Release.Namespace }}
 ---
-{{- $image := printf "%s%s" .Values.registry .Values.operator.image -}}
+{{- $image := printf "%s%s" .Values.registry .Values.operator.image }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

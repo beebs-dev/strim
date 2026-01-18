@@ -5,8 +5,9 @@ mod colors;
 mod connection;
 mod server;
 
+use crate::args::{Target, TargetArgs};
 use crate::colors::{FG1, FG2};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use connection::{Connection, ConnectionError, ReadResult};
 use kube::Client;
@@ -90,7 +91,21 @@ async fn run_server(args: args::ServerArgs) -> Result<()> {
         args.namespace,
         args.port,
         &app_options.push,
-        args.target,
+        args.target
+            .map(|target: TargetArgs| -> Result<Option<Target>> {
+                if target.bucket.as_ref().is_some_and(|b| !b.is_empty()) {
+                    Ok(Some(
+                        target
+                            .try_into()
+                            .context("Failed to parse target configuration")?,
+                    ))
+                } else {
+                    Ok(None)
+                }
+            })
+            .transpose()
+            .context("Failed to parse target configuration")?
+            .flatten(),
     );
     let mut connection_count = 1;
     let mut connections = Slab::new();
