@@ -1,0 +1,162 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Release.Name }}-strim
+  labels:
+    app: {{ .Release.Name }}-strim
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Release.Name }}-strim
+  labels:
+    app: {{ .Release.Name }}-strim
+rules:
+  - apiGroups:
+    - "strim.beebs.dev"
+    resources:
+      - strims
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Release.Name }}-strim
+  labels:
+    app: {{ .Release.Name }}-strim
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ .Release.Name }}-strim
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Release.Name }}-strim
+---
+{{- $image := printf "%s%s" .Values.registry .Values.strim.image -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-strim
+spec:
+  replicas: {{ .Values.strim.replicas }}
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-strim
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-strim
+    spec:
+    {{- if .Values.imagePullSecrets }}
+      imagePullSecrets:
+{{ toYaml .Values.imagePullSecrets | indent 10 }}
+    {{- end }}
+      serviceAccountName: {{ .Release.Name }}-strim
+      containers:
+      - name: strim
+        imagePullPolicy: {{ .Values.strim.imagePullPolicy }}
+        image: {{ $image }}
+    {{- if .Values.strim.resources }}
+        resources:
+{{ toYaml .Values.strim.resources | indent 10 }}
+    {{- end }}
+        command:
+          - synapse-strim
+          - server
+          - --port
+          - "7080"
+        ports:
+        - containerPort: 7080
+          protocol: TCP
+          name: rtmp
+{{- if .Values.prometheus.enabled }}
+        - containerPort: 2112
+          protocol: TCP
+          name: metrics
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 2112
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 2112
+{{- else }}
+        readinessProbe:
+          exec:
+            command:
+            - cat
+            - /etc/ready
+          initialDelaySeconds: 5
+          periodSeconds: 5
+{{- end }}
+        env:
+        - name: SERVICE_NAME
+          value: strim
+        - name: RUST_LOG
+          value: info,aws_smithy_runtime=debug,aws_smithy_http_tower=debug,hyper=info
+        - name: LOG_LEVEL
+          value: {{ .Values.strim.logLevel }}
+        - name: TARGET_BUCKET
+          value: {{ .Values.strim.target.bucket }}
+        - name: TARGET_ENDPOINT
+          value: {{ .Values.strim.target.endpoint }}
+        - name: TARGET_REGION
+          value: {{ .Values.strim.target.region }}
+        - name: TARGET_SECRET
+          value: {{ .Values.strim.target.secret }}
+        - name: TARGET_KEY_PREFIX
+          value: {{ .Values.strim.target.keyPrefix }}
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: POD_UID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.uid
+        - name: NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+{{ include "synapse.metrics-env" . | indent 8 }}
+---
+{{- if .Values.prometheus.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ .Release.Name }}-strim
+  labels:
+    chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
+spec:
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-strim
+  podMetricsEndpoints:
+  - port: metrics
+{{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-strim
+  labels:
+    app: {{ .Release.Name }}-strim
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ .Release.Name }}-strim
+  ports:
+  - name: rtmp
+    port: 7080

@@ -1,14 +1,11 @@
 use clap::Parser;
 
-/// Command line arguments for the proxy
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
 pub(crate) struct RunArgs {
     #[arg(long, env = "NODE_ID", required = true)]
     pub node_id: String,
 
-    //#[command(flatten)]
-    //pub nats: synapse_common::args::NatsArgs,
     #[arg(long, env = "HLS_DIR", required = true)]
     pub hls_dir: String,
 

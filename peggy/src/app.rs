@@ -15,6 +15,8 @@ use std::{ops::Deref, os::unix::fs::MetadataExt, path::PathBuf, sync::Arc, time:
 use tokio::{select, sync::mpsc};
 use tokio_util::sync::CancellationToken;
 
+use crate::args::RunArgs;
+
 const FG1_COLOR: (u8, u8, u8) = (163, 83, 207);
 const FG2_COLOR: (u8, u8, u8) = (90, 70, 130);
 const FG1: Rgb = Rgb(FG1_COLOR.0, FG1_COLOR.1, FG1_COLOR.2);
@@ -133,7 +135,7 @@ impl App {
     }
 }
 
-pub async fn run(args: crate::args::RunArgs) -> Result<()> {
+pub async fn run(args: RunArgs) -> Result<()> {
     strim_common::metrics::maybe_spawn_metrics_server();
 
     let cancel = CancellationToken::new();
