@@ -61,8 +61,6 @@ impl App {
     }
 
     pub async fn handle_segment(&self, path: &PathBuf) -> Result<()> {
-        // TODO: send to whisper
-        println!("TODO: send segment to whisper: {:?}", path);
         self.upload_to_s3(path, true).await
     }
 
@@ -141,6 +139,13 @@ impl App {
     }
 
     pub async fn garbage_collect_old_segments_in_s3(&self, max_age: Duration) -> Result<()> {
+        println!(
+            "{}{}{}{}",
+            "🧹 Starting S3 garbage collection of old segments • bucket=".color(FG1),
+            self.bucket.color(FG2),
+            " • prefix=".color(FG1),
+            self.key_prefix.color(FG2),
+        );
         let now = SystemTime::now();
         let cutoff = match now.checked_sub(max_age) {
             Some(cutoff) => cutoff,
@@ -202,6 +207,15 @@ impl App {
                     .send()
                     .await
                     .with_context(|| format!("Failed to delete old S3 segment '{}'", key))?;
+                println!(
+                    "{}{}{}{}",
+                    "🗑️  Deleted old S3 segment • key=".color(FG1),
+                    key.color(FG2),
+                    " • last_modified=".color(FG1),
+                    humantime::format_rfc3339_seconds(last_modified)
+                        .to_string()
+                        .color(FG2),
+                );
                 deleted += 1;
             }
 
@@ -277,6 +291,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
         let gc_app = app.clone();
         let gc_cancel = cancel.clone();
         tokio::spawn(async move {
+            // Subsequent runs
             let mut ticker = tokio::time::interval(max_age);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {

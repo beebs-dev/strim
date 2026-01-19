@@ -767,7 +767,7 @@ impl Server {
                     key_prefix: format!("{}/", stream_key),
                     delete_old_segments_after: Some("30m".to_string()),
                 },
-                transcribe: true,
+                transcribe: false,
             },
             ..Default::default()
         };

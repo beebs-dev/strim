@@ -14,9 +14,12 @@ use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use super::actions;
-use crate::util::{
-    Error, PROBE_INTERVAL,
-    colors::{FG1, FG2},
+use crate::{
+    strims::actions::HASH_ANNOTATION_NAME,
+    util::{
+        self, Error, PROBE_INTERVAL,
+        colors::{FG1, FG2},
+    },
 };
 
 #[cfg(feature = "metrics")]
@@ -44,8 +47,8 @@ pub async fn run(client: Client) -> Result<(), Error> {
 
     // Namespace where the Lease object lives.
     // Commonly: the controller's namespace. If you deploy in one namespace, hardcode it.
-    // If you want it dynamic, inject POD_NAMESPACE via the Downward API.
-    let lease_namespace = std::env::var("POD_NAMESPACE").unwrap_or_else(|_| "default".to_string());
+    // If you want it dynamic, inject NAMESPACE via the Downward API.
+    let lease_namespace = std::env::var("NAMESPACE").unwrap_or_else(|_| "default".to_string());
     // Unique identity per replica (Downward API POD_NAME is ideal).
     // Fallback to hostname if not present.
     let holder_id = std::env::var("POD_NAME")
@@ -168,10 +171,6 @@ enum StrimAction {
         pod_name: String,
     },
 
-    /// Delete all subresources and remove finalizer only when all subresources are deleted.
-    /// If `delete_resource` is true, the [`Strim`] resource will be deleted as well.
-    Delete,
-
     /// Signals that the [`Strim`] is fully reconciled.
     Active {
         pod_name: String,
@@ -182,6 +181,8 @@ enum StrimAction {
 
     /// The [`Strim`] resource is in desired state and requires no actions to be taken.
     NoOp,
+
+    Requeue(Duration),
 }
 
 impl StrimAction {
@@ -190,10 +191,10 @@ impl StrimAction {
             StrimAction::CreatePod => "CreatePod",
             StrimAction::DeletePod => "DeletePod",
             StrimAction::Starting { .. } => "Starting",
-            StrimAction::Delete => "Delete",
             StrimAction::Active { .. } => "Active",
             StrimAction::NoOp => "NoOp",
             StrimAction::Error(_) => "Error",
+            StrimAction::Requeue(_) => "Requeue",
         }
     }
 }
@@ -282,6 +283,7 @@ async fn reconcile(instance: Arc<Strim>, context: Arc<ContextData>) -> Result<Ac
     // Performs action as decided by the `determine_action` function.
     // This is the write phase of reconciliation.
     let result = match action {
+        StrimAction::Requeue(duration) => Action::requeue(duration),
         StrimAction::Starting { pod_name } => {
             // Update the phase to Starting.
             actions::starting(client, &instance, &pod_name).await?;
@@ -293,16 +295,16 @@ async fn reconcile(instance: Arc<Strim>, context: Arc<ContextData>) -> Result<Ac
 
             Action::await_change()
         }
-        StrimAction::Delete => {
-            // Show that the reservation is being terminated.
-            actions::terminating(client.clone(), &instance).await?;
+        // StrimAction::Delete => {
+        //     // Show that the reservation is being terminated.
+        //     actions::terminating(client.clone(), &instance).await?;
 
-            // Remove the finalizer from the Strim resource.
-            //finalizer::delete::<Strim>(client.clone(), &name, &namespace).await?;
+        //     // Remove the finalizer from the Strim resource.
+        //     //finalizer::delete::<Strim>(client.clone(), &name, &namespace).await?;
 
-            // Child resources will be deleted by kubernetes.
-            Action::await_change()
-        }
+        //     // Child resources will be deleted by kubernetes.
+        //     Action::await_change()
+        // }
         StrimAction::CreatePod => {
             // Add a finalizer so the resource can be properly garbage collected.
             //let instance = finalizer::add(client.clone(), &name, &namespace).await?;
@@ -347,8 +349,9 @@ async fn determine_action(
     namespace: &str,
     instance: &Strim,
 ) -> Result<StrimAction, Error> {
+    // Don't do anything while being deleted.
     if instance.metadata.deletion_timestamp.is_some() {
-        return Ok(StrimAction::Delete);
+        return Ok(StrimAction::Requeue(Duration::from_millis(500)));
     }
 
     // Does the ffmpeg pod exist?
@@ -362,8 +365,25 @@ async fn determine_action(
         Some(pod) => pod,
         None => return Ok(StrimAction::CreatePod),
     };
-    let pod_phase = pod.status.as_ref().and_then(|s| s.phase.as_deref());
-    match pod_phase {
+
+    // Don't do anything while the pod is being deleted.
+    if pod.metadata.deletion_timestamp.is_some() {
+        return Ok(StrimAction::Requeue(Duration::from_millis(500)));
+    }
+
+    // Check the hash
+    let desired_hash = util::hash_spec(&instance.spec);
+    if !pod
+        .metadata
+        .annotations
+        .as_ref()
+        .is_some_and(|a| a.get(HASH_ANNOTATION_NAME) == Some(&desired_hash))
+    {
+        println!("Spec hash mismatch, recreating Pod");
+        return Ok(StrimAction::DeletePod);
+    }
+
+    match pod.status.as_ref().and_then(|s| s.phase.as_deref()) {
         Some("Pending") | Some("ContainerCreating") => {
             if instance
                 .status

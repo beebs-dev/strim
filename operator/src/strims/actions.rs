@@ -1,16 +1,15 @@
-use crate::util::{Error, messages, patch::*};
-use k8s_openapi::{
-    api::core::v1::{
-        Container, EnvVar, EnvVarSource, ObjectFieldSelector, Pod, PodSpec, ResourceRequirements,
-        SecretKeySelector, Volume, VolumeMount,
-    },
-    apimachinery::pkg::api::resource::Quantity,
+use crate::util::{self, Error, messages, patch::*};
+use k8s_openapi::api::core::v1::{
+    Container, EnvVar, EnvVarSource, ObjectFieldSelector, Pod, PodSpec, SecretKeySelector, Volume,
+    VolumeMount,
 };
 use kube::{
     Api, Client,
     api::{ObjectMeta, Resource},
 };
 use strim_types::*;
+
+pub const HASH_ANNOTATION_NAME: &str = "strim.beebs.dev/spec-hash";
 
 /// Updates the `Strim`'s phase to Active.
 pub async fn active(client: Client, instance: &Strim, peggy_pod_name: &str) -> Result<(), Error> {
@@ -56,7 +55,7 @@ pub async fn starting(client: Client, instance: &Strim, pod_name: &str) -> Resul
     Ok(())
 }
 
-fn ffmpeg_pod(instance: &Strim) -> Pod {
+pub fn pod_resource(instance: &Strim) -> Pod {
     // For simplicity, we create a pod spec with a single container
     // that runs ffmpeg to stream from the source to the destination
     const HLS_DIR: &str = "/hls";
@@ -66,6 +65,12 @@ fn ffmpeg_pod(instance: &Strim) -> Pod {
             name: instance.meta().name.clone(),
             namespace: instance.meta().namespace.clone(),
             owner_references: Some(vec![instance.controller_owner_ref(&()).unwrap()]),
+            annotations: Some({
+                let mut annotations = std::collections::BTreeMap::new();
+                let hash = util::hash_spec(&instance.spec);
+                annotations.insert(HASH_ANNOTATION_NAME.to_string(), hash);
+                annotations
+            }),
             ..Default::default()
         },
         spec: Some(PodSpec {
@@ -171,14 +176,23 @@ fn ffmpeg_pod(instance: &Strim) -> Pod {
                                 ..Default::default()
                             },
                         ];
-                        if let Some(delete_after) = &instance.spec.target.delete_old_segments_after
-                        {
-                            env.push(EnvVar {
-                                name: "DELETE_OLD_SEGMENTS_AFTER".to_string(),
-                                value: Some(delete_after.clone()),
-                                ..Default::default()
-                            });
-                        }
+                        println!("{:?}", instance.spec.target.delete_old_segments_after);
+                        //if let Some(delete_after) = &instance.spec.target.delete_old_segments_after
+                        //{
+                        env.push(EnvVar {
+                            name: "DELETE_OLD_SEGMENTS_AFTER".to_string(),
+                            value: Some(
+                                instance
+                                    .spec
+                                    .target
+                                    .delete_old_segments_after
+                                    .as_deref()
+                                    .unwrap_or("problem?")
+                                    .to_string(),
+                            ),
+                            ..Default::default()
+                        });
+                        //}
                         env
                     }),
                     ..Default::default()
@@ -207,7 +221,11 @@ fn ffmpeg_pod(instance: &Strim) -> Pod {
 }
 
 pub async fn create_pod(client: Client, instance: &Strim) -> Result<(), Error> {
-    let pod = ffmpeg_pod(instance);
+    let pod = pod_resource(instance);
+    println!(
+        "DESIRED POD:\n{}",
+        serde_json::to_string_pretty(&pod).unwrap()
+    );
     patch_status(client.clone(), instance, |status| {
         status.phase = StrimPhase::Starting;
         status.message = Some(starting_message(pod.meta().name.as_ref().unwrap()));
@@ -215,7 +233,19 @@ pub async fn create_pod(client: Client, instance: &Strim) -> Result<(), Error> {
     .await?;
     let pods: Api<Pod> =
         Api::namespaced(client.clone(), instance.meta().namespace.as_ref().unwrap());
-    pods.create(&Default::default(), &pod).await?;
+    let created = match pods.create(&Default::default(), &pod).await {
+        Ok(p) => p,
+        Err(e) => match e {
+            kube::Error::Api(ae) if ae.code == 409 => {
+                pods.get(pod.meta().name.as_ref().unwrap()).await?
+            }
+            _ => return Err(Error::from(e)),
+        },
+    };
+    println!(
+        "CANONICAL POD (from apiserver):\n{}",
+        serde_json::to_string_pretty(&created).unwrap()
+    );
     Ok(())
 }
 
