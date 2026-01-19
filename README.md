@@ -1,0 +1,1 @@
+Kubernetes native RTMP → HLS pipeline. Suitable when you want to send a live stream to an S3-compatible CDN for syndication.
