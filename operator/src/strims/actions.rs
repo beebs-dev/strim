@@ -6,6 +6,7 @@ use k8s_openapi::api::core::v1::{
 use kube::{
     Api, Client,
     api::{ObjectMeta, Resource},
+    runtime::reflector::Lookup,
 };
 use strim_common::annotations;
 use strim_types::*;
@@ -264,14 +265,13 @@ pub async fn create_pod(client: Client, instance: &Strim) -> Result<(), Error> {
     })
     .await?;
     let pods: Api<Pod> = Api::namespaced(client.clone(), instance_namespace(instance)?);
-    let _created = match pods.create(&Default::default(), &pod).await {
-        Ok(p) => p,
+    match pods.create(&Default::default(), &pod).await {
+        Ok(_) => Ok(()),
         Err(e) => match e {
-            kube::Error::Api(ae) if ae.code == 409 => pods.get(pod_name).await?,
+            kube::Error::Api(ae) if ae.code == 409 => Ok(()),
             _ => return Err(Error::from(e)),
         },
-    };
-    Ok(())
+    }
 }
 
 pub async fn error(client: Client, instance: &Strim, message: String) -> Result<(), Error> {
