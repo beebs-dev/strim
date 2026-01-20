@@ -20,7 +20,7 @@ use rml_rtmp::time::RtmpTimestamp;
 use serde::Deserialize;
 use sha2::Digest;
 use slab::Slab;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 use strim_types::{Strim, StrimSource, StrimSpec, StrimTarget};
 
@@ -740,7 +740,14 @@ impl Server {
             metadata: ObjectMeta {
                 name: Some(name),
                 namespace: Some(self.namespace.clone()),
-                annotations: None,
+                annotations: Some({
+                    let mut annotations = BTreeMap::new();
+                    annotations.insert(
+                        "strim.beebs.dev/created-by".to_string(),
+                        "strim".to_string(),
+                    );
+                    annotations
+                }),
                 labels: None,
                 owner_references: Some(vec![OwnerReference {
                     api_version: "v1".to_string(),
