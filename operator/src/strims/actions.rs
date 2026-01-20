@@ -23,12 +23,25 @@ pub async fn active(client: Client, instance: &Strim, peggy_pod_name: &str) -> R
     Ok(())
 }
 
-pub async fn delete_pod(client: Client, instance: &Strim) -> Result<(), Error> {
+pub async fn delete_pod(client: Client, instance: &Strim, reason: String) -> Result<(), Error> {
+    let pod_name = instance.meta().name.as_ref().unwrap();
+    println!(
+        "Deleting Pod '{}' for Strim '{}' • reason: {}",
+        pod_name, pod_name, reason
+    );
+    patch_status(client.clone(), instance, |status| {
+        status.phase = StrimPhase::Pending;
+        status.message = Some(delete_message(&reason));
+    })
+    .await?;
     let pods: Api<Pod> =
         Api::namespaced(client.clone(), instance.meta().namespace.as_ref().unwrap());
-    pods.delete(instance.meta().name.as_ref().unwrap(), &Default::default())
-        .await?;
+    pods.delete(pod_name, &Default::default()).await?;
     Ok(())
+}
+
+fn delete_message(reason: &str) -> String {
+    format!("The peggy Pod is being deleted. Reason: {}", reason)
 }
 
 fn starting_message(pod_name: &str) -> String {

@@ -163,7 +163,9 @@ enum StrimAction {
     /// Create all subresources required by the [`Strim`].
     CreatePod,
 
-    DeletePod,
+    DeletePod {
+        reason: String,
+    },
 
     Starting {
         pod_name: String,
@@ -187,7 +189,7 @@ impl StrimAction {
     fn to_str(&self) -> &str {
         match self {
             StrimAction::CreatePod => "CreatePod",
-            StrimAction::DeletePod => "DeletePod",
+            StrimAction::DeletePod { .. } => "DeletePod",
             StrimAction::Starting { .. } => "Starting",
             StrimAction::Active { .. } => "Active",
             StrimAction::NoOp => "NoOp",
@@ -288,8 +290,8 @@ async fn reconcile(instance: Arc<Strim>, context: Arc<ContextData>) -> Result<Ac
 
             Action::await_change()
         }
-        StrimAction::DeletePod => {
-            actions::delete_pod(client.clone(), &instance).await?;
+        StrimAction::DeletePod { reason } => {
+            actions::delete_pod(client.clone(), &instance, reason).await?;
 
             Action::await_change()
         }
@@ -377,29 +379,53 @@ async fn determine_action(
         .as_ref()
         .is_none_or(|a| a.get(annotations::SPEC_HASH) != Some(&desired_hash))
     {
-        println!("Spec hash mismatch, recreating Pod");
-        return Ok(StrimAction::DeletePod);
+        return Ok(StrimAction::DeletePod {
+            reason: "Spec hash mismatch".to_string(),
+        });
     }
 
     match pod.status.as_ref().and_then(|s| s.phase.as_deref()) {
+        Some("Running") => { /* continue */ }
         Some("Pending") | Some("ContainerCreating") => {
-            if instance
+            return if instance
                 .status
                 .as_ref()
                 .is_some_and(|s| s.phase == StrimPhase::Starting)
             {
-                return Ok(StrimAction::NoOp);
-            }
-            return Ok(StrimAction::Starting {
-                pod_name: pod.meta().name.clone().unwrap(),
+                Ok(StrimAction::NoOp)
+            } else {
+                Ok(StrimAction::Starting {
+                    pod_name: pod.meta().name.clone().unwrap(),
+                })
+            };
+        }
+        Some("Succeeded") => {
+            return Ok(StrimAction::DeletePod {
+                reason: "Pod unexpectedly terminated with 'Succeeded' status".to_string(),
             });
         }
-        Some("Running") => {}
-        Some("Succeeded") | Some("Failed") => {
-            return Ok(StrimAction::DeletePod);
+        Some("Failed") => {
+            return Ok(StrimAction::DeletePod {
+                reason: "Pod unexpectedly terminated with 'Failed' status".to_string(),
+            });
         }
-        _ => {
-            return Ok(StrimAction::Error("Pod is in unknown state.".to_owned()));
+        Some(phase) => {
+            return Ok(StrimAction::Error(format!(
+                "Pod is in unknown phase: {}",
+                phase
+            )));
+        }
+        None => {
+            return if pod
+                .metadata
+                .creation_timestamp
+                .is_some_and(|t| Utc::now().signed_duration_since(t.0).num_seconds() < 10)
+            {
+                // Pod just created, wait a bit
+                Ok(StrimAction::Requeue(Duration::from_secs(3)))
+            } else {
+                Ok(StrimAction::Error("Pod has no status phase".to_string()))
+            };
         }
     }
 
@@ -410,16 +436,13 @@ async fn determine_action(
             if let Some(state) = &container_status.state
                 && let Some(ref terminated) = state.terminated
             {
-                println!(
-                    "Pod's container terminated with exit code {} and reason: {}",
-                    terminated.exit_code,
-                    terminated
-                        .reason
-                        .as_ref()
-                        .unwrap_or(&"No reason provided".to_string())
-                );
-                // Recreate the pod
-                return Ok(StrimAction::DeletePod);
+                return Ok(StrimAction::DeletePod {
+                    reason: format!(
+                        "Pod's container terminated with exit code {} and reason: {}",
+                        terminated.exit_code,
+                        terminated.reason.as_deref().unwrap_or("No reason provided")
+                    ),
+                });
             }
         }
     }
