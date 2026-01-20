@@ -22,6 +22,7 @@ use sha2::Digest;
 use slab::Slab;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
+use strim_common::annotations;
 use strim_types::{Strim, StrimSource, StrimSpec, StrimTarget};
 
 #[derive(Deserialize, Clone, Debug)]
@@ -38,9 +39,9 @@ fn stream_hash(pod_ip: &str, stream_key: &str, entropy: usize) -> String {
     format!("{:x}", hash.finalize())[..8].to_string()
 }
 
-fn pod_name(pod_ip: &str, stream_key: &str, entropy: usize) -> (String, String) {
+fn pod_name(pod_ip: &str, stable_id: &str, stream_key: &str, entropy: usize) -> (String, String) {
     let hash = stream_hash(pod_ip, stream_key, entropy);
-    (format!("ffmpeg-{}", hash), hash)
+    (format!("live-{}-{}", stable_id, hash), hash)
 }
 
 enum ReceivedDataType {
@@ -600,46 +601,30 @@ impl Server {
         stream_key: String,
         server_results: &mut Vec<ServerResult>,
     ) {
-        //let Ok(stream_key) = URL_SAFE_NO_PAD.decode(stream_key.as_bytes()) else {
-        //    eprintln!(
-        //        "{}{}{}{}",
-        //        "❌ Publish request stream key base64 decode failed • connection_id=".red(),
-        //        requested_connection_id.red().dimmed(),
-        //        " • stream_key=".red(),
-        //        stream_key.red().dimmed(),
-        //    );
-        //    return;
-        //};
-        //let Ok(StreamKeyPayload {
-        //    stream_key,
-        //    stable_id,
-        //}) = serde_json::from_slice(&stream_key)
-        //else {
-        //    eprintln!(
-        //        "{}{}{}{}",
-        //        "❌ Publish request stream key JSON decode failed • connection_id=".red(),
-        //        requested_connection_id.red().dimmed(),
-        //        " • stream_key=".red(),
-        //        String::from_utf8_lossy(&stream_key).red().dimmed(),
-        //    );
-        //    return;
-        //};
+        let (app_name, stable_id) = match app_name.split_once('/') {
+            Some(v) => v,
+            None => {
+                eprintln!(
+                    "{}{}{}{}",
+                    "❌ Publish request app name format invalid • connection_id=".red(),
+                    requested_connection_id.red().dimmed(),
+                    " • app_name=".red(),
+                    app_name.red().dimmed(),
+                );
+                server_results.push(ServerResult::DisconnectConnection {
+                    connection_id: requested_connection_id,
+                });
+                return;
+            }
+        };
         eprintln!(
-            "{}{}{}{}",
+            "{}{}{}{}{}{}",
             "📢 Publish requested • app_name=".color(FG1),
             app_name.color(FG2),
+            " • stable_id=".color(FG1),
+            stable_id.color(FG2),
             " • stream_key=".color(FG1),
             stream_key.color(FG2),
-        );
-        println!(
-            "{}",
-            format!(
-                "TODO: announce publish request for stream key '{}' over redis, requested_connection_id={}, request_id={}",
-                stream_key,
-                requested_connection_id,
-                request_id
-            )
-            .magenta()
         );
         match self.channels.get(&stream_key) {
             None => (),
@@ -724,7 +709,7 @@ impl Server {
             }
         }
         let random_usize = rand::random::<u64>() as usize;
-        let (name, _hash) = pod_name(&self.pod_ip, &stream_key, random_usize);
+        let (name, _hash) = pod_name(&self.pod_ip, stable_id, &stream_key, random_usize);
         let target = match self.target {
             Some(ref target) => target,
             None => return, // no s3 upload``
@@ -742,10 +727,8 @@ impl Server {
                 namespace: Some(self.namespace.clone()),
                 annotations: Some({
                     let mut annotations = BTreeMap::new();
-                    annotations.insert(
-                        "strim.beebs.dev/created-by".to_string(),
-                        "strim".to_string(),
-                    );
+                    annotations.insert(annotations::CREATED_BY.to_string(), "strim".to_string());
+                    annotations.insert(annotations::STABLE_ID.to_string(), stable_id.to_string());
                     annotations
                 }),
                 labels: None,
@@ -763,7 +746,7 @@ impl Server {
                 source: StrimSource {
                     internal_url: format!(
                         "rtmp://{}:{}/live/{}",
-                        self.pod_ip, self.port, stream_key
+                        self.pod_ip, self.port, stable_id
                     ),
                 },
                 target: StrimTarget {

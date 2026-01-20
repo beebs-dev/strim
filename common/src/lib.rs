@@ -16,6 +16,7 @@ pub mod redis;
 pub mod shutdown;
 
 pub mod annotations {
+    pub const STABLE_ID: &str = "strim.beebs.dev/stable-id";
     pub const CREATED_BY: &str = "strim.beebs.dev/created-by";
     pub const SPEC_HASH: &str = "strim.beebs.dev/spec-hash";
 }
