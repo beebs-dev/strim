@@ -8,10 +8,10 @@ use kube::{
 };
 use kube_leader_election::{LeaseLock, LeaseLockParams};
 use owo_colors::OwoColorize;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc, time::Instant};
 use strim_common::annotations;
 use strim_types::*;
-use tokio::time::Duration;
+use tokio::{sync::Mutex, time::Duration};
 use tokio_util::sync::CancellationToken;
 
 use super::actions;
@@ -25,7 +25,7 @@ use crate::util::metrics::ControllerMetrics;
 
 /// Entrypoint for the `Strim` controller.
 pub async fn run(client: Client) -> Result<(), Error> {
-    println!("{}", "Starting Strim controller...".green());
+    println!("{}", "⚙️ Starting Strim controller...".green());
 
     // Preparation of resources used by the `kube_runtime::Controller`
     let context: Arc<ContextData> = Arc::new(ContextData::new(client.clone()));
@@ -105,7 +105,7 @@ pub async fn run(client: Client) -> Result<(), Error> {
         if lease.acquired_lease {
             // We are leader; ensure controller is running
             if controller_task.is_none() {
-                println!("acquired leadership; starting controller");
+                println!("{}", "👑 Acquired leadership; starting controller".green());
                 let client_for_controller = client.clone();
                 let context_for_controller = context.clone();
                 let controller_namespace = lease_namespace.clone();
@@ -138,6 +138,8 @@ struct ContextData {
 
     #[cfg(feature = "metrics")]
     metrics: ControllerMetrics,
+
+    last_action: Mutex<HashMap<(String, String), (StrimAction, Instant)>>,
 }
 
 impl ContextData {
@@ -152,17 +154,21 @@ impl ContextData {
             ContextData {
                 client,
                 metrics: ControllerMetrics::new("consumers"),
+                last_action: Mutex::new(HashMap::new()),
             }
         }
         #[cfg(not(feature = "metrics"))]
         {
-            ContextData { client }
+            ContextData {
+                client,
+                last_action: Mutex::new(HashMap::new()),
+            }
         }
     }
 }
 
 /// Action to be taken upon an `Strim` resource during reconciliation
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 enum StrimAction {
     /// Create all subresources required by the [`Strim`].
     CreatePod,
@@ -253,14 +259,26 @@ async fn reconcile(instance: Arc<Strim>, context: Arc<ContextData>) -> Result<Ac
     let action = determine_action(client.clone(), &name, &namespace, &instance).await?;
 
     if action != StrimAction::NoOp {
-        println!(
-            "🔧 {}{}{}{}{}",
-            namespace.color(FG2),
-            "/".color(FG1),
-            name.color(FG2),
-            " ACTION: ".color(FG1),
-            format!("{:?}", action).color(FG2),
-        );
+        let value = {
+            let mut la = context.last_action.lock().await;
+            la.insert(
+                (namespace.clone(), name.clone()),
+                (action.clone(), Instant::now()),
+            )
+        };
+        if let Some((last_action, last_instant)) = value
+            && (Some(&action) != Some(&last_action)
+                || last_instant.elapsed() > Duration::from_secs(300))
+        {
+            println!(
+                "🔧 {}{}{}{}{}",
+                namespace.color(FG2),
+                "/".color(FG1),
+                name.color(FG2),
+                " ACTION: ".color(FG1),
+                format!("{:?}", action).color(FG2),
+            );
+        }
     }
 
     // Report the read phase performance.
@@ -473,7 +491,11 @@ fn determine_phase_action(pod: &Pod) -> Option<StrimAction> {
     }
 }
 
-fn check_container_status(pod: &Pod, container_status: &ContainerStatus) -> Option<StrimAction> {
+fn check_container_status(
+    pod: &Pod,
+    container_status: &ContainerStatus,
+    allow_success: bool,
+) -> Option<StrimAction> {
     let state = match &container_status.state {
         Some(state) => state,
         None => {
@@ -486,7 +508,9 @@ fn check_container_status(pod: &Pod, container_status: &ContainerStatus) -> Opti
             });
         }
     };
-    if let Some(ref terminated) = state.terminated {
+    if let Some(ref terminated) = state.terminated
+        && (!allow_success || terminated.exit_code != 0)
+    {
         let reason = terminated.reason.as_deref().unwrap_or("");
         let kind = match (terminated.exit_code, reason) {
             (0, "Completed") => "completed normally",
@@ -604,7 +628,19 @@ fn check_container_statuses(
     container_statuses: &[ContainerStatus],
 ) -> Option<StrimAction> {
     for container_status in container_statuses {
-        if let Some(action) = check_container_status(pod, container_status) {
+        if let Some(action) = check_container_status(pod, container_status, false) {
+            return Some(action);
+        }
+    }
+    None
+}
+
+fn check_init_container_statuses(
+    pod: &Pod,
+    container_statuses: &[ContainerStatus],
+) -> Option<StrimAction> {
+    for container_status in container_statuses {
+        if let Some(action) = check_container_status(pod, container_status, true) {
             return Some(action);
         }
     }
@@ -616,7 +652,7 @@ fn determine_container_action(pod: &Pod) -> Option<StrimAction> {
         .status
         .as_ref()
         .and_then(|s| s.init_container_statuses.as_ref())
-        && let Some(action) = check_container_statuses(pod, init_statuses)
+        && let Some(action) = check_init_container_statuses(pod, init_statuses)
     {
         return Some(action);
     }
