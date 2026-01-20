@@ -1,6 +1,6 @@
 use chrono::Utc;
 use futures::stream::StreamExt;
-use k8s_openapi::api::core::v1::Pod;
+use k8s_openapi::api::core::v1::{ContainerStatus, Pod};
 use kube::{
     Api, ResourceExt,
     client::Client,
@@ -175,8 +175,12 @@ enum StrimAction {
         reason: String,
     },
 
+    Terminating {
+        reason: String,
+    },
+
     Starting {
-        pod_name: String,
+        reason: String,
     },
 
     /// Signals that the [`Strim`] is fully reconciled.
@@ -196,6 +200,7 @@ enum StrimAction {
 impl StrimAction {
     fn to_str(&self) -> &str {
         match self {
+            StrimAction::Terminating { .. } => "Terminating",
             StrimAction::CreatePod => "CreatePod",
             StrimAction::DeletePod { .. } => "DeletePod",
             StrimAction::Starting { .. } => "Starting",
@@ -293,54 +298,34 @@ async fn reconcile(instance: Arc<Strim>, context: Arc<ContextData>) -> Result<Ac
     // This is the write phase of reconciliation.
     let result = match action {
         StrimAction::Requeue(duration) => Action::requeue(duration),
-        StrimAction::Pending { reason } => {
-            // Update the phase to Pending.
-            actions::pending(client, &instance, reason).await?;
-
+        StrimAction::Terminating { reason } => {
+            actions::terminating(client, &instance, reason).await?;
             Action::await_change()
         }
-        StrimAction::Starting { pod_name } => {
-            // Update the phase to Starting.
-            actions::starting(client, &instance, &pod_name).await?;
-
+        StrimAction::Pending { reason } => {
+            actions::pending(client, &instance, reason).await?;
+            Action::await_change()
+        }
+        StrimAction::Starting { reason } => {
+            actions::starting(client, &instance, reason).await?;
             Action::await_change()
         }
         StrimAction::DeletePod { reason } => {
             actions::delete_pod(client.clone(), &instance, reason).await?;
-
             Action::await_change()
         }
-        // StrimAction::Delete => {
-        //     // Show that the reservation is being terminated.
-        //     actions::terminating(client.clone(), &instance).await?;
-
-        //     // Remove the finalizer from the Strim resource.
-        //     //finalizer::delete::<Strim>(client.clone(), &name, &namespace).await?;
-
-        //     // Child resources will be deleted by kubernetes.
-        //     Action::await_change()
-        // }
         StrimAction::CreatePod => {
-            // Add a finalizer so the resource can be properly garbage collected.
-            //let instance = finalizer::add(client.clone(), &name, &namespace).await?;
-            // Note: finalizer is not required since we do not have custom logic on deletion of child resources.
             actions::create_pod(client.clone(), &instance).await?;
-
             Action::await_change()
         }
         StrimAction::Error(message) => {
             actions::error(client.clone(), &instance, message).await?;
-
             Action::await_change()
         }
         StrimAction::Active { pod_name } => {
-            // Update the phase to Active, meaning the reservation is in use.
             actions::active(client, &instance, &pod_name).await?;
-
-            // Resource is fully reconciled.
             Action::requeue(PROBE_INTERVAL)
         }
-        // The resource is already in desired state, do nothing and re-check after 10 seconds
         StrimAction::NoOp => Action::requeue(PROBE_INTERVAL),
     };
 
@@ -369,7 +354,7 @@ async fn determine_action(
         return Ok(StrimAction::Requeue(Duration::from_secs(2)));
     }
 
-    // Does the ffmpeg pod exist?
+    // Does the pod exist?
     let pod = match get_pod(client.clone(), namespace, &instance.name_any()).await? {
         Some(pod) => pod,
         None => return Ok(StrimAction::CreatePod),
@@ -377,7 +362,9 @@ async fn determine_action(
 
     // Don't do anything while the pod is being deleted.
     if pod.metadata.deletion_timestamp.is_some() {
-        return Ok(StrimAction::Requeue(Duration::from_secs(2)));
+        return Ok(StrimAction::Terminating {
+            reason: format!("Pod '{}' is being deleted", pod.name_any()),
+        });
     }
 
     // Check the hash
@@ -389,75 +376,243 @@ async fn determine_action(
         .is_none_or(|a| a.get(annotations::SPEC_HASH) != Some(&desired_hash))
     {
         return Ok(StrimAction::DeletePod {
-            reason: "Spec hash mismatch".to_string(),
+            reason: format!("Pod '{}' spec hash mismatch", pod.name_any()),
         });
     }
 
+    if let Some(action) = determine_phase_action(&pod) {
+        return Ok(action);
+    }
+
+    if let Some(action) = determine_container_action(&pod) {
+        return Ok(action);
+    }
+
+    if pod_is_ready(&pod).unwrap_or(false) {
+        determine_status_action(instance)
+    } else {
+        Ok(StrimAction::Starting {
+            reason: format!(
+                "Pod '{}' is running but pending Ready status",
+                pod.name_any()
+            ),
+        })
+    }
+}
+
+fn determine_phase_action(pod: &Pod) -> Option<StrimAction> {
     match pod.status.as_ref().and_then(|s| s.phase.as_deref()) {
-        Some("Running") => { /* continue */ }
+        Some("Running") => None,
         Some("Pending") => {
-            return if instance
-                .status
-                .as_ref()
-                .is_some_and(|s| s.phase == StrimPhase::Starting)
+            return if let Some(status) = &pod.status
+                && let Some(cond) = status
+                    .conditions
+                    .as_ref()
+                    .and_then(|cs| cs.iter().find(|c| c.type_ == "PodScheduled"))
+                && cond.status == "False"
+                && cond.reason.as_deref() == Some("Unschedulable")
             {
-                Ok(StrimAction::NoOp)
+                Some(StrimAction::Error(format!(
+                    "Pod '{}' is unschedulable: {}",
+                    pod.name_any(),
+                    cond.message.as_deref().unwrap_or("unspecified"),
+                )))
             } else {
-                Ok(StrimAction::Starting {
-                    pod_name: pod.name_any(),
+                Some(StrimAction::Pending {
+                    reason: format!("Pod '{}' is still in Pending phase", pod.name_any()),
                 })
             };
         }
-        Some(v) if ["Succeeded", "Failed", "CrashLoopBackOff"].contains(&v) => {
-            return Ok(StrimAction::DeletePod {
-                reason: format!("Pod unexpectedly terminated with '{}' phase", v),
-            });
-        }
-        Some(v) if v == "Pending" => {
-            return Ok(StrimAction::Pending {
-                reason: format!("Pod is still in Pending phase"),
-            });
-        }
-        Some(phase) => {
-            return Ok(StrimAction::Error(format!(
-                "Pod is in unknown phase: {}",
-                phase
-            )));
-        }
+        Some(v) if ["Succeeded", "Failed"].contains(&v) => Some(StrimAction::DeletePod {
+            reason: format!("Pod unexpectedly terminated with '{}' phase", v),
+        }),
+        Some("Unknown") => Some(StrimAction::Error(format!(
+            "Pod is in Unknown phase; node may be lost or unreachable. Reason: {} Message: {}",
+            pod.status
+                .as_ref()
+                .and_then(|s| s.reason.as_deref())
+                .unwrap_or("(no reason provided)"),
+            pod.status
+                .as_ref()
+                .and_then(|s| s.message.as_deref())
+                .unwrap_or("(no message provided)")
+        ))),
+        Some(phase) => Some(StrimAction::Error(format!(
+            "Pod is in unrecognized phase: {}",
+            phase
+        ))),
         None => {
-            return if pod
+            if pod
                 .metadata
                 .creation_timestamp
+                .as_ref()
                 .is_some_and(|t| Utc::now().signed_duration_since(t.0).num_seconds() < 10)
             {
                 // Pod just created, wait a bit
-                Ok(StrimAction::Requeue(Duration::from_secs(3)))
+                Some(StrimAction::Requeue(Duration::from_secs(3)))
             } else {
-                Ok(StrimAction::Error("Pod has no status phase".to_string()))
-            };
-        }
-    }
-
-    if let Some(ref status) = pod.status
-        && let Some(ref container_statuses) = status.container_statuses
-    {
-        for container_status in container_statuses {
-            if let Some(state) = &container_status.state
-                && let Some(ref terminated) = state.terminated
-            {
-                return Ok(StrimAction::DeletePod {
-                    reason: format!(
-                        "Pod's container terminated with exit code {} and reason: {}",
-                        terminated.exit_code,
-                        terminated.reason.as_deref().unwrap_or("No reason provided")
-                    ),
-                });
+                Some(StrimAction::Error("Pod has no status phase".to_string()))
             }
         }
     }
+}
 
-    // Keep the Active status up-to-date.
-    determine_status_action(instance)
+fn check_container_status(pod: &Pod, container_status: &ContainerStatus) -> Option<StrimAction> {
+    let state = match &container_status.state {
+        Some(state) => state,
+        None => {
+            return Some(StrimAction::Starting {
+                reason: format!(
+                    "Pod '{}' container '{}' has no state yet",
+                    pod.name_any(),
+                    container_status.name,
+                ),
+            });
+        }
+    };
+    if let Some(ref terminated) = state.terminated {
+        let reason = terminated.reason.as_deref().unwrap_or("");
+        let kind = match (terminated.exit_code, reason) {
+            (0, "Completed") => "completed normally",
+            (_, "OOMKilled") => "OOMKilled",
+            (_, "ContainerCannotRun") => "container cannot run",
+            _ => "terminated with error",
+        };
+        return Some(StrimAction::DeletePod {
+            reason: format!(
+                "Pod '{}' container '{}' {} (exit code {}, reason: {})",
+                pod.name_any(),
+                container_status.name,
+                kind,
+                terminated.exit_code,
+                terminated
+                    .reason
+                    .as_deref()
+                    .unwrap_or("(no reason provided)")
+            ),
+        });
+    }
+    if let Some(ref waiting) = state.waiting
+        && let Some(reason_str) = waiting.reason.as_deref()
+    {
+        // Note: there may not be a waiting reason, in which case we treat it as not existing.
+        const FATAL_WAITING: &[&'static str] = &[
+            "ImagePullBackOff",
+            "ErrImageNeverPull",
+            "RegistryUnavailable",
+            "CreateSandboxError",
+            "ErrImagePull",
+            "InvalidImageName",
+            "CreateContainerConfigError",
+            "CreateContainerError",
+            "RunContainerError",
+        ];
+        return if reason_str == "CrashLoopBackOff" {
+            // Extract the status code from the last termination state if possible
+            if let Some(t) = container_status
+                .last_state
+                .as_ref()
+                .and_then(|last_state| last_state.terminated.as_ref())
+            {
+                Some(StrimAction::DeletePod {
+                    reason: format!(
+                        "Pod '{}' container '{}' is in CrashLoopBackOff (last exit code {}, reason: {})",
+                        pod.name_any(),
+                        container_status.name,
+                        t.exit_code,
+                        t.reason.as_deref().unwrap_or("(no reason provided)"),
+                    ),
+                })
+            } else {
+                Some(StrimAction::DeletePod {
+                    reason: format!(
+                        "Pod '{}' container '{}' is in CrashLoopBackOff (no last termination details available)",
+                        pod.name_any(),
+                        container_status.name,
+                    ),
+                })
+            }
+        } else if FATAL_WAITING.contains(&reason_str) {
+            Some(StrimAction::DeletePod {
+                reason: format!(
+                    "Pod '{}' container '{}' is in unrecoverable waiting state: {}",
+                    pod.name_any(),
+                    container_status.name,
+                    reason_str,
+                ),
+            })
+        } else {
+            Some(StrimAction::Starting {
+                reason: format!(
+                    "Pod '{}' container '{}' is waiting with status '{}'",
+                    pod.name_any(),
+                    container_status.name,
+                    if reason_str.is_empty() {
+                        "(no reason provided)"
+                    } else {
+                        reason_str
+                    },
+                ),
+            })
+        };
+    }
+    state.running.as_ref().and_then(|running| {
+        if container_status.ready {
+            None
+        } else {
+            Some(StrimAction::Starting {
+                reason: format!(
+                    "Pod '{}' container '{}' is running but not Ready yet (started_at = {:?})",
+                    pod.name_any(),
+                    container_status.name,
+                    running.started_at,
+                ),
+            })
+        }
+    })
+}
+
+fn pod_is_ready(pod: &Pod) -> Option<bool> {
+    pod.status
+        .as_ref()?
+        .conditions
+        .as_ref()?
+        .iter()
+        .find(|c| c.type_ == "Ready")
+        .map(|c| c.status == "True")
+}
+
+fn check_container_statuses(
+    pod: &Pod,
+    container_statuses: &[ContainerStatus],
+) -> Option<StrimAction> {
+    for container_status in container_statuses {
+        if let Some(action) = check_container_status(pod, container_status) {
+            return Some(action);
+        }
+    }
+    None
+}
+
+fn determine_container_action(pod: &Pod) -> Option<StrimAction> {
+    if let Some(init_statuses) = pod
+        .status
+        .as_ref()
+        .and_then(|s| s.init_container_statuses.as_ref())
+        && let Some(action) = check_container_statuses(pod, init_statuses)
+    {
+        return Some(action);
+    }
+    match pod
+        .status
+        .as_ref()
+        .and_then(|s| s.container_statuses.as_ref())
+    {
+        Some(v) => check_container_statuses(pod, v),
+        None => Some(StrimAction::Starting {
+            reason: format!("Pod '{}' has no container statuses yet", pod.name_any()),
+        }),
+    }
 }
 
 async fn get_pod(client: Client, namespace: &str, name: &str) -> Result<Option<Pod>, Error> {
@@ -472,7 +627,12 @@ async fn get_pod(client: Client, namespace: &str, name: &str) -> Result<Option<P
 /// Determines the action given that the only thing left to do
 /// is periodically keeping the Active phase up-to-date.
 fn determine_status_action(instance: &Strim) -> Result<StrimAction, Error> {
-    let (phase, age) = get_strim_phase(instance)?;
+    let Some(phase) = get_phase(instance) else {
+        return Ok(StrimAction::Active {
+            pod_name: instance.name_any(),
+        });
+    };
+    let age = get_last_updated(instance).unwrap_or(Duration::from_secs(0));
     if phase != StrimPhase::Active || age > PROBE_INTERVAL {
         Ok(StrimAction::Active {
             pod_name: instance.name_any(),
@@ -483,19 +643,27 @@ fn determine_status_action(instance: &Strim) -> Result<StrimAction, Error> {
 }
 
 /// Returns the phase of the Strim.
-pub fn get_strim_phase(instance: &Strim) -> Result<(StrimPhase, Duration), Error> {
-    let status = instance
-        .status
-        .as_ref()
-        .ok_or_else(|| Error::UserInput("No status".to_string()))?;
-    let phase = status.phase;
-    let last_updated: chrono::DateTime<Utc> = status
+pub fn get_phase(instance: &Strim) -> Option<StrimPhase> {
+    instance.status.as_ref().map(|status| status.phase)
+}
+
+pub fn get_last_updated(instance: &Strim) -> Option<Duration> {
+    let Some(status) = instance.status.as_ref() else {
+        return None;
+    };
+    let Ok(Some(last_updated)) = status
         .last_updated
         .as_ref()
-        .ok_or_else(|| Error::UserInput("No lastUpdated".to_string()))?
-        .parse()?;
+        .map(|l| l.parse::<chrono::DateTime<Utc>>())
+        .transpose()
+    else {
+        return None;
+    };
     let age: chrono::Duration = Utc::now() - last_updated;
-    Ok((phase, age.to_std()?))
+    let Ok(age) = age.to_std() else {
+        return None;
+    };
+    Some(age)
 }
 
 /// Actions to be taken when a reconciliation fails - for whatever reason.

@@ -63,14 +63,10 @@ fn delete_message(reason: &str) -> String {
     format!("The peggy Pod is being deleted. Reason: {}", reason)
 }
 
-fn starting_message(pod_name: &str) -> String {
-    format!("The peggy Pod '{}' is starting.", pod_name)
-}
-
-pub async fn starting(client: Client, instance: &Strim, pod_name: &str) -> Result<(), Error> {
+pub async fn starting(client: Client, instance: &Strim, reason: String) -> Result<(), Error> {
     patch_status(client, instance, |status| {
         status.phase = StrimPhase::Starting;
-        status.message = Some(starting_message(pod_name));
+        status.message = Some(reason);
     })
     .await?;
     Ok(())
@@ -79,6 +75,15 @@ pub async fn starting(client: Client, instance: &Strim, pod_name: &str) -> Resul
 pub async fn pending(client: Client, instance: &Strim, reason: String) -> Result<(), Error> {
     patch_status(client, instance, |status| {
         status.phase = StrimPhase::Pending;
+        status.message = Some(reason);
+    })
+    .await?;
+    Ok(())
+}
+
+pub async fn terminating(client: Client, instance: &Strim, reason: String) -> Result<(), Error> {
+    patch_status(client, instance, |status| {
+        status.phase = StrimPhase::Terminating;
         status.message = Some(reason);
     })
     .await?;
@@ -255,7 +260,7 @@ pub async fn create_pod(client: Client, instance: &Strim) -> Result<(), Error> {
     let pod_name = instance_name(instance)?;
     patch_status(client.clone(), instance, |status| {
         status.phase = StrimPhase::Starting;
-        status.message = Some(starting_message(pod_name));
+        status.message = Some(format!("Creating peggy Pod '{}'", pod_name));
     })
     .await?;
     let pods: Api<Pod> = Api::namespaced(client.clone(), instance_namespace(instance)?);
