@@ -10,6 +10,22 @@ use kube::{
 use strim_common::annotations;
 use strim_types::*;
 
+fn instance_name(instance: &Strim) -> Result<&str, Error> {
+    instance
+        .meta()
+        .name
+        .as_deref()
+        .ok_or_else(|| Error::UserInput("Strim is missing metadata.name".to_string()))
+}
+
+fn instance_namespace(instance: &Strim) -> Result<&str, Error> {
+    instance
+        .meta()
+        .namespace
+        .as_deref()
+        .ok_or_else(|| Error::UserInput("Strim is missing metadata.namespace".to_string()))
+}
+
 /// Updates the `Strim`'s phase to Active.
 pub async fn active(client: Client, instance: &Strim, peggy_pod_name: &str) -> Result<(), Error> {
     patch_status(client, instance, |status| {
@@ -24,7 +40,7 @@ pub async fn active(client: Client, instance: &Strim, peggy_pod_name: &str) -> R
 }
 
 pub async fn delete_pod(client: Client, instance: &Strim, reason: String) -> Result<(), Error> {
-    let pod_name = instance.meta().name.as_ref().unwrap();
+    let pod_name = instance_name(instance)?;
     println!(
         "Deleting Pod '{}' for Strim '{}' • reason: {}",
         pod_name, pod_name, reason
@@ -34,9 +50,12 @@ pub async fn delete_pod(client: Client, instance: &Strim, reason: String) -> Res
         status.message = Some(delete_message(&reason));
     })
     .await?;
-    let pods: Api<Pod> =
-        Api::namespaced(client.clone(), instance.meta().namespace.as_ref().unwrap());
-    pods.delete(pod_name, &Default::default()).await?;
+    let pods: Api<Pod> = Api::namespaced(client.clone(), instance_namespace(instance)?);
+    match pods.delete(pod_name, &Default::default()).await {
+        Ok(_) => {}
+        Err(kube::Error::Api(ae)) if ae.code == 404 => {}
+        Err(e) => return Err(Error::from(e)),
+    }
     Ok(())
 }
 
@@ -57,15 +76,26 @@ pub async fn starting(client: Client, instance: &Strim, pod_name: &str) -> Resul
     Ok(())
 }
 
-pub fn pod_resource(instance: &Strim) -> Pod {
+pub async fn pending(client: Client, instance: &Strim, reason: String) -> Result<(), Error> {
+    patch_status(client, instance, |status| {
+        status.phase = StrimPhase::Pending;
+        status.message = Some(reason);
+    })
+    .await?;
+    Ok(())
+}
+
+pub fn pod_resource(instance: &Strim) -> Result<Pod, Error> {
     // For simplicity, we create a pod spec with a single container
     // that runs ffmpeg to stream from the source to the destination
     const HLS_DIR: &str = "/hls";
     let image = String::from("thavlik/strim-peggy:latest");
-    Pod {
+    let name = instance_name(instance)?.to_string();
+    let namespace = instance_namespace(instance)?.to_string();
+    Ok(Pod {
         metadata: ObjectMeta {
-            name: instance.meta().name.clone(),
-            namespace: instance.meta().namespace.clone(),
+            name: Some(name),
+            namespace: Some(namespace),
             owner_references: Some(vec![instance.controller_owner_ref(&()).unwrap()]),
             annotations: Some({
                 let mut annotations = std::collections::BTreeMap::new();
@@ -184,23 +214,15 @@ pub fn pod_resource(instance: &Strim) -> Pod {
                                 ..Default::default()
                             },
                         ];
-                        println!("{:?}", instance.spec.target.delete_old_segments_after);
-                        //if let Some(delete_after) = &instance.spec.target.delete_old_segments_after
-                        //{
-                        env.push(EnvVar {
-                            name: "DELETE_OLD_SEGMENTS_AFTER".to_string(),
-                            value: Some(
-                                instance
-                                    .spec
-                                    .target
-                                    .delete_old_segments_after
-                                    .as_deref()
-                                    .unwrap_or("problem?")
-                                    .to_string(),
-                            ),
-                            ..Default::default()
-                        });
-                        //}
+                        if let Some(delete_after) =
+                            instance.spec.target.delete_old_segments_after.as_deref()
+                        {
+                            env.push(EnvVar {
+                                name: "DELETE_OLD_SEGMENTS_AFTER".to_string(),
+                                value: Some(delete_after.to_string()),
+                                ..Default::default()
+                            });
+                        }
                         env
                     }),
                     ..Default::default()
@@ -225,35 +247,25 @@ pub fn pod_resource(instance: &Strim) -> Pod {
             ..Default::default()
         }),
         status: None,
-    }
+    })
 }
 
 pub async fn create_pod(client: Client, instance: &Strim) -> Result<(), Error> {
-    let pod = pod_resource(instance);
-    println!(
-        "DESIRED POD:\n{}",
-        serde_json::to_string_pretty(&pod).unwrap()
-    );
+    let pod = pod_resource(instance)?;
+    let pod_name = instance_name(instance)?;
     patch_status(client.clone(), instance, |status| {
         status.phase = StrimPhase::Starting;
-        status.message = Some(starting_message(pod.meta().name.as_ref().unwrap()));
+        status.message = Some(starting_message(pod_name));
     })
     .await?;
-    let pods: Api<Pod> =
-        Api::namespaced(client.clone(), instance.meta().namespace.as_ref().unwrap());
-    let created = match pods.create(&Default::default(), &pod).await {
+    let pods: Api<Pod> = Api::namespaced(client.clone(), instance_namespace(instance)?);
+    let _created = match pods.create(&Default::default(), &pod).await {
         Ok(p) => p,
         Err(e) => match e {
-            kube::Error::Api(ae) if ae.code == 409 => {
-                pods.get(pod.meta().name.as_ref().unwrap()).await?
-            }
+            kube::Error::Api(ae) if ae.code == 409 => pods.get(pod_name).await?,
             _ => return Err(Error::from(e)),
         },
     };
-    println!(
-        "CANONICAL POD (from apiserver):\n{}",
-        serde_json::to_string_pretty(&created).unwrap()
-    );
     Ok(())
 }
 

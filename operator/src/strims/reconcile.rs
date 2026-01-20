@@ -2,7 +2,7 @@ use chrono::Utc;
 use futures::stream::StreamExt;
 use k8s_openapi::api::core::v1::Pod;
 use kube::{
-    Api, Resource, ResourceExt,
+    Api, ResourceExt,
     client::Client,
     runtime::{Controller, controller::Action},
 };
@@ -43,9 +43,8 @@ pub async fn run(client: Client) -> Result<(), Error> {
     //    .await;
     //Ok(())
 
-    // Namespace where the Lease object lives.
-    // Commonly: the controller's namespace. If you deploy in one namespace, hardcode it.
-    // If you want it dynamic, inject NAMESPACE via the Downward API.
+    // Namespace where we run both leader election and the controller.
+    // This lets us keep RBAC namespaced rather than cluster-scoped.
     let lease_namespace = std::env::var("NAMESPACE").unwrap_or_else(|_| "default".to_string());
     // Unique identity per replica (Downward API POD_NAME is ideal).
     // Fallback to hostname if not present.
@@ -109,11 +108,16 @@ pub async fn run(client: Client) -> Result<(), Error> {
                 println!("acquired leadership; starting controller");
                 let client_for_controller = client.clone();
                 let context_for_controller = context.clone();
-                let crd_api_for_controller: Api<Strim> = Api::all(client_for_controller.clone());
+                let controller_namespace = lease_namespace.clone();
+                let crd_api_for_controller: Api<Strim> =
+                    Api::namespaced(client_for_controller.clone(), &controller_namespace);
                 controller_task = Some(tokio::spawn(async move {
                     println!("{}", "🚀 Strim controller started.".green());
                     Controller::new(crd_api_for_controller, Default::default())
-                        .owns(Api::<Pod>::all(client_for_controller), Default::default())
+                        .owns(
+                            Api::<Pod>::namespaced(client_for_controller, &controller_namespace),
+                            Default::default(),
+                        )
                         .run(reconcile, on_error, context_for_controller)
                         .for_each(|_res| async move {})
                         .await;
@@ -163,6 +167,10 @@ enum StrimAction {
     /// Create all subresources required by the [`Strim`].
     CreatePod,
 
+    Pending {
+        reason: String,
+    },
+
     DeletePod {
         reason: String,
     },
@@ -195,6 +203,7 @@ impl StrimAction {
             StrimAction::NoOp => "NoOp",
             StrimAction::Error(_) => "Error",
             StrimAction::Requeue(_) => "Requeue",
+            StrimAction::Pending { .. } => "Pending",
         }
     }
 }
@@ -284,6 +293,12 @@ async fn reconcile(instance: Arc<Strim>, context: Arc<ContextData>) -> Result<Ac
     // This is the write phase of reconciliation.
     let result = match action {
         StrimAction::Requeue(duration) => Action::requeue(duration),
+        StrimAction::Pending { reason } => {
+            // Update the phase to Pending.
+            actions::pending(client, &instance, reason).await?;
+
+            Action::await_change()
+        }
         StrimAction::Starting { pod_name } => {
             // Update the phase to Starting.
             actions::starting(client, &instance, &pod_name).await?;
@@ -351,24 +366,18 @@ async fn determine_action(
 ) -> Result<StrimAction, Error> {
     // Don't do anything while being deleted.
     if instance.metadata.deletion_timestamp.is_some() {
-        return Ok(StrimAction::Requeue(Duration::from_millis(500)));
+        return Ok(StrimAction::Requeue(Duration::from_secs(2)));
     }
 
     // Does the ffmpeg pod exist?
-    let pod = match get_pod(
-        client.clone(),
-        namespace,
-        instance.meta().name.as_ref().unwrap(),
-    )
-    .await?
-    {
+    let pod = match get_pod(client.clone(), namespace, &instance.name_any()).await? {
         Some(pod) => pod,
         None => return Ok(StrimAction::CreatePod),
     };
 
     // Don't do anything while the pod is being deleted.
     if pod.metadata.deletion_timestamp.is_some() {
-        return Ok(StrimAction::Requeue(Duration::from_millis(500)));
+        return Ok(StrimAction::Requeue(Duration::from_secs(2)));
     }
 
     // Check the hash
@@ -386,7 +395,7 @@ async fn determine_action(
 
     match pod.status.as_ref().and_then(|s| s.phase.as_deref()) {
         Some("Running") => { /* continue */ }
-        Some("Pending") | Some("ContainerCreating") => {
+        Some("Pending") => {
             return if instance
                 .status
                 .as_ref()
@@ -395,18 +404,18 @@ async fn determine_action(
                 Ok(StrimAction::NoOp)
             } else {
                 Ok(StrimAction::Starting {
-                    pod_name: pod.meta().name.clone().unwrap(),
+                    pod_name: pod.name_any(),
                 })
             };
         }
-        Some("Succeeded") => {
+        Some(v) if ["Succeeded", "Failed", "CrashLoopBackOff"].contains(&v) => {
             return Ok(StrimAction::DeletePod {
-                reason: "Pod unexpectedly terminated with 'Succeeded' status".to_string(),
+                reason: format!("Pod unexpectedly terminated with '{}' phase", v),
             });
         }
-        Some("Failed") => {
-            return Ok(StrimAction::DeletePod {
-                reason: "Pod unexpectedly terminated with 'Failed' status".to_string(),
+        Some(v) if v == "Pending" => {
+            return Ok(StrimAction::Pending {
+                reason: format!("Pod is still in Pending phase"),
             });
         }
         Some(phase) => {
@@ -466,7 +475,7 @@ fn determine_status_action(instance: &Strim) -> Result<StrimAction, Error> {
     let (phase, age) = get_strim_phase(instance)?;
     if phase != StrimPhase::Active || age > PROBE_INTERVAL {
         Ok(StrimAction::Active {
-            pod_name: instance.meta().name.clone().unwrap(),
+            pod_name: instance.name_any(),
         })
     } else {
         Ok(StrimAction::NoOp)
