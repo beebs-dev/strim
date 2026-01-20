@@ -9,17 +9,15 @@ use kube::{
 use kube_leader_election::{LeaseLock, LeaseLockParams};
 use owo_colors::OwoColorize;
 use std::sync::Arc;
+use strim_common::annotations;
 use strim_types::*;
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use super::actions;
-use crate::{
-    strims::actions::HASH_ANNOTATION_NAME,
-    util::{
-        self, Error, PROBE_INTERVAL,
-        colors::{FG1, FG2},
-    },
+use crate::util::{
+    self, Error, PROBE_INTERVAL,
+    colors::{FG1, FG2},
 };
 
 #[cfg(feature = "metrics")]
@@ -373,11 +371,11 @@ async fn determine_action(
 
     // Check the hash
     let desired_hash = util::hash_spec(&instance.spec);
-    if !pod
+    if pod
         .metadata
         .annotations
         .as_ref()
-        .is_some_and(|a| a.get(HASH_ANNOTATION_NAME) == Some(&desired_hash))
+        .is_none_or(|a| a.get(annotations::SPEC_HASH) != Some(&desired_hash))
     {
         println!("Spec hash mismatch, recreating Pod");
         return Ok(StrimAction::DeletePod);

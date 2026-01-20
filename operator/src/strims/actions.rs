@@ -1,4 +1,4 @@
-use crate::util::{self, Error, messages, patch::*};
+use crate::util::{self, Error, patch::*};
 use k8s_openapi::api::core::v1::{
     Container, EnvVar, EnvVarSource, ObjectFieldSelector, Pod, PodSpec, SecretKeySelector, Volume,
     VolumeMount,
@@ -7,9 +7,8 @@ use kube::{
     Api, Client,
     api::{ObjectMeta, Resource},
 };
+use strim_common::annotations;
 use strim_types::*;
-
-pub const HASH_ANNOTATION_NAME: &str = "strim.beebs.dev/spec-hash";
 
 /// Updates the `Strim`'s phase to Active.
 pub async fn active(client: Client, instance: &Strim, peggy_pod_name: &str) -> Result<(), Error> {
@@ -19,16 +18,6 @@ pub async fn active(client: Client, instance: &Strim, peggy_pod_name: &str) -> R
             "The peggy Pod '{}' is active and running.",
             peggy_pod_name
         ));
-    })
-    .await?;
-    Ok(())
-}
-
-/// Updates the `Strim`'s phase to Terminating.
-pub async fn terminating(client: Client, instance: &Strim) -> Result<(), Error> {
-    patch_status(client, instance, |status| {
-        status.phase = StrimPhase::Terminating;
-        status.message = Some(messages::TERMINATING.to_owned());
     })
     .await?;
     Ok(())
@@ -67,8 +56,14 @@ pub fn pod_resource(instance: &Strim) -> Pod {
             owner_references: Some(vec![instance.controller_owner_ref(&()).unwrap()]),
             annotations: Some({
                 let mut annotations = std::collections::BTreeMap::new();
-                let hash = util::hash_spec(&instance.spec);
-                annotations.insert(HASH_ANNOTATION_NAME.to_string(), hash);
+                annotations.insert(
+                    annotations::SPEC_HASH.to_string(),
+                    util::hash_spec(&instance.spec),
+                );
+                annotations.insert(
+                    annotations::CREATED_BY.to_string(),
+                    "strim-operator".to_string(),
+                );
                 annotations
             }),
             ..Default::default()

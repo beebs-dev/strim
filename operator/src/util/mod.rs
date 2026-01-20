@@ -3,7 +3,6 @@ pub mod metrics;
 pub mod patch;
 
 pub(crate) mod colors;
-pub(crate) mod messages;
 
 mod error;
 mod merge;

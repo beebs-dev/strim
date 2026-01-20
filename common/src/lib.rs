@@ -15,6 +15,11 @@ pub mod rbac;
 pub mod redis;
 pub mod shutdown;
 
+pub mod annotations {
+    pub const CREATED_BY: &str = "strim.beebs.dev/created-by";
+    pub const SPEC_HASH: &str = "strim.beebs.dev/spec-hash";
+}
+
 pub fn init() {
     let disable_colors = ["1", "true"].contains(
         &std::env::var("DISABLE_COLORS")
