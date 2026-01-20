@@ -6,7 +6,6 @@ use k8s_openapi::api::core::v1::{
 use kube::{
     Api, Client,
     api::{ObjectMeta, Resource},
-    runtime::reflector::Lookup,
 };
 use strim_common::annotations;
 use strim_types::*;
